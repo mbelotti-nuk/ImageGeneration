@@ -17,10 +17,10 @@ import torchvision.transforms as transforms
 out_res = (256,256)
 latent_dim = 512
 device = "mps"
-check_point_dir = "trained_nets/pggan"
+check_point_dir = "trained_nets/prova"
 lr = 1E-3
 resume = False
-resume_seq = 3
+resume_seq = 2
 
 # Set training schedule
 
@@ -33,11 +33,11 @@ def set_schedule(batch_size, num_train_imgs, num_warm_up_imgs):
     return n_iter_warm_up, n_iter_train
 
 training_schedule = [  
-                    schedule(n_warm_up=0,       n_train=50_000,   batch_size=16,   size=4), # 4 x 4
-                    schedule(n_warm_up=50_000,  n_train=50_000,   batch_size=16,   size=8), # 8 x 8
-                    schedule(n_warm_up=50_000,  n_train=50_000,   batch_size=16,   size=16), # 16 x 16
-                    schedule(n_warm_up=30_000,  n_train=30_000,   batch_size=16,  size=32), # 32 x 32
-                    schedule(n_warm_up=20_000,  n_train=20_000,   batch_size=16,  size=64), # 64 x 64
+                    schedule(n_warm_up=0,       n_train=80_000,   batch_size=16,   size=4), # 4 x 4
+                    schedule(n_warm_up=80_000,  n_train=80_000,   batch_size=16,   size=8), # 8 x 8
+                    schedule(n_warm_up=60_000,  n_train=60_000,   batch_size=16,   size=16), # 16 x 16
+                    schedule(n_warm_up=50_000,  n_train=50_000,   batch_size=16,  size=32), # 32 x 32
+                    schedule(n_warm_up=30_000,  n_train=30_000,   batch_size=16,  size=64), # 64 x 64
                     schedule(n_warm_up=20_000,  n_train=20_000,   batch_size=8,  size=128), # 128 x 128
                     schedule(n_warm_up=20_000,  n_train=20_000,   batch_size=8,  size=256), # 256 x 256           
                     ]
