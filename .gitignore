@@ -1,4 +1,4 @@
 Data/
 trained_nets/
-MINST/
+MNIST/
 __pycache__/

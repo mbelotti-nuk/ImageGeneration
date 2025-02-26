@@ -6,11 +6,13 @@ import math
 EMBED_T = 256
 NUM_GROUPS = 16
 
+
 class DiffusionUNet(nn.Module):
     def __init__(self, in_channels, resolution, attn_resolutions, ch_mult, channels, time_steps=1000, device="mps"):
         super().__init__()
         self.device = device
         self.time_steps = time_steps
+        self.schedule = LinearNoiseScheduler(time_steps, beta_start=0.1, beta_end=0.99)
 
         self.sinusoidal_embedding = SinusoidalEmbeddings(time_steps)
         self.in_conv = nn.Conv2d(in_channels=in_channels, out_channels=channels, kernel_size=3, stride=1, padding=1)
@@ -57,38 +59,94 @@ class DiffusionUNet(nn.Module):
         return self.last_conv(x)
     
 
-    def reverse_diffusion(self, initial_noise, diffusion_steps, schedule):
+    def reverse_diffusion(self, initial_noise, diffusion_steps):
         num_images = initial_noise.shape[0]
-        current_images = initial_noise
-        denoised_images = []
+        xt = initial_noise
         with torch.no_grad():
-            for t in reversed( range(1, diffusion_steps) ):
-
+            for t in reversed( range(0, diffusion_steps) ):
                 time = torch.ones((num_images,), dtype=torch.int32)*t
-                diffusion_time = (time/diffusion_steps)[:, None, None, None]
-
-                noise_rates, signal_rates = schedule(diffusion_time)
-                pred_noises = self(current_images.to(self.device), time)
-
-                # denoise the variable 'current_images' with the predicted nois
-                # inverse of:
-                # noise_img = signal_rates_off * img + noise_rates * noises
-                pred_images = (1/signal_rates) * (current_images.cpu() - noise_rates * pred_noises.cpu())
-
-                denoised_images.append(pred_images.cpu())
-
-                next_time = torch.ones((num_images,))*(t-1)
-                next_diffusion_time = (next_time/diffusion_steps)[:, None, None, None]     
-                next_noise_rates, next_signal_rates = schedule(next_diffusion_time)
-                current_images = next_signal_rates * pred_images + next_noise_rates * pred_noises.cpu()
-
-        return pred_images.cpu(), denoised_images
+                noise_pred = self(xt.to(self.device), time).cpu()
+                xt, x_0_pred = self.schedule.sample_prev_timestep(xt.cpu(), noise_pred, t)
+        return xt
 
     
-    def sample_images(self, initial_noise, diffusion_steps, schedule):
-        pred_images = self.reverse_diffusion(initial_noise, diffusion_steps, schedule)
-        pred_images = ( (pred_images + 1)*0.5 ).clamp(0,1)  #(pred_images.clamp(-1,1)+1)/2
-        return pred_images #.type(torch.uint8) #.permute(0,2,3,1)
+    
+
+class LinearNoiseScheduler:
+    r"""
+    Class for the linear noise scheduler that is used in DDPM.
+    """
+    
+    def __init__(self, num_timesteps, beta_start, beta_end):
+        self.num_timesteps = num_timesteps
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        # Mimicking how compvis repo creates schedule
+        self.betas = (
+                torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_timesteps) ** 2
+        )
+        self.alphas = 1. - self.betas
+        self.alpha_cum_prod = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_cum_prod = torch.sqrt(self.alpha_cum_prod)
+        self.sqrt_one_minus_alpha_cum_prod = torch.sqrt(1 - self.alpha_cum_prod)
+    
+    def add_noise(self, original, noise, t):
+        r"""
+        Forward method for diffusion
+        :param original: Image on which noise is to be applied
+        :param noise: Random Noise Tensor (from normal dist)
+        :param t: timestep of the forward process of shape -> (B,)
+        :return:
+        """
+        original_shape = original.shape
+        batch_size = original_shape[0]
+        
+        sqrt_alpha_cum_prod = self.sqrt_alpha_cum_prod.to(original.device)[t].reshape(batch_size)
+        sqrt_one_minus_alpha_cum_prod = self.sqrt_one_minus_alpha_cum_prod.to(original.device)[t].reshape(batch_size)
+        
+        # Reshape till (B,) becomes (B,1,1,1) if image is (B,C,H,W)
+        for _ in range(len(original_shape) - 1):
+            sqrt_alpha_cum_prod = sqrt_alpha_cum_prod.unsqueeze(-1)
+        for _ in range(len(original_shape) - 1):
+            sqrt_one_minus_alpha_cum_prod = sqrt_one_minus_alpha_cum_prod.unsqueeze(-1)
+        
+        # Apply and Return Forward process equation
+        return (sqrt_alpha_cum_prod.to(original.device) * original
+                + sqrt_one_minus_alpha_cum_prod.to(original.device) * noise)
+    
+    def sample_prev_timestep(self, xt, noise_pred, t):
+        r"""
+            Use the noise prediction by model to get
+            xt-1 using xt and the nosie predicted
+        :param xt: current timestep sample
+        :param noise_pred: model noise prediction
+        :param t: current timestep we are at
+        :return:
+        """
+
+        x0 = ((xt - (self.sqrt_one_minus_alpha_cum_prod.to(xt.device)[t] * noise_pred)) /
+              torch.sqrt(self.alpha_cum_prod.to(xt.device)[t]))
+        x0 = torch.clamp(x0, -1., 1.)
+        
+        mean = xt - ((self.betas.to(xt.device)[t]) * noise_pred) / (self.sqrt_one_minus_alpha_cum_prod.to(xt.device)[t])
+        mean = mean / torch.sqrt(self.alphas.to(xt.device)[t])
+        
+        if t == 0:
+            return mean, x0
+        else:
+            variance = (1 - self.alpha_cum_prod.to(xt.device)[t - 1]) / (1.0 - self.alpha_cum_prod.to(xt.device)[t])
+            variance = variance * self.betas.to(xt.device)[t]
+            sigma = variance ** 0.5
+            z = torch.randn(xt.shape).to(xt.device)
+            
+            # OR
+            # variance = self.betas[t]
+            # sigma = variance ** 0.5
+            # z = torch.randn(xt.shape).to(xt.device)
+            return mean + sigma * z, x0
+
+
+    
 
 class UpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, attention=False):
